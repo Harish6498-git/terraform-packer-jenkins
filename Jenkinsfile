@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION = 'us-east-2'  // Change as per your region
+        AWS_REGION = 'us-east-2'
         TF_DIR = 'terraform/terraform-infra'
         PKR_DIR = 'packer'
     }
@@ -14,13 +14,34 @@ pipeline {
             }
         }
 
-        stage('Terraform Init & Apply (VPC + RDS)') {
+        stage('Terraform Init & Validate') {
             steps {
                 dir("${TF_DIR}") {
                     sh '''
+                        rm -rf .terraform .terraform.lock.hcl || true
                         terraform init
-                        terraform apply -auto-approve
+                        terraform validate
                     '''
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                dir("${TF_DIR}") {
+                    sh 'terraform plan -out=tfplan.out'
+                }
+            }
+        }
+
+        stage('Terraform Apply (VPC + RDS)') {
+            steps {
+                dir("${TF_DIR}") {
+                    timeout(time: 15, unit: 'MINUTES') {
+                        sh '''
+                            TF_LOG=INFO terraform apply -auto-approve tfplan.out > terraform-apply.log 2>&1
+                        '''
+                    }
                 }
             }
         }
@@ -100,10 +121,9 @@ pipeline {
             steps {
                 sh """
                     aws ec2 create-launch-template --launch-template-name backend-template --version-description "backend" \
-                        --launch-template-data '{"ImageId":"${BACKEND_AMI_ID}", "key_name ":"project.pem", "InstanceType":"t2.micro"}' \
+                        --launch-template-data '{"ImageId":"${BACKEND_AMI_ID}","KeyName":"project.pem","InstanceType":"t2.micro"}' \
                         --region ${AWS_REGION}
-                    
-                    # TODO: Create Target Group, ALB, ASG for Backend using CLI or Terraform
+                    # TODO: Add Target Group, ALB, and ASG
                 """
             }
         }
@@ -112,10 +132,9 @@ pipeline {
             steps {
                 sh """
                     aws ec2 create-launch-template --launch-template-name frontend-template --version-description "frontend" \
-                        --launch-template-data '{"ImageId":"${FRONTEND_AMI_ID}", "key_name ":"project.pem", "InstanceType":"t2.micro"}' \
+                        --launch-template-data '{"ImageId":"${FRONTEND_AMI_ID}","KeyName":"project.pem","InstanceType":"t2.micro"}' \
                         --region ${AWS_REGION}
-                    
-                    # TODO: Create Target Group, ALB, ASG for Frontend using CLI or Terraform
+                    # TODO: Add Target Group, ALB, and ASG
                 """
             }
         }
@@ -127,14 +146,14 @@ pipeline {
                     echo "DB_USER=${RDS_USERNAME}" >> .env
                     echo "DB_PASS=${RDS_PASSWORD}" >> .env
                 """
-                // You can SCP this .env to a user-data script or AMI provision
+                // Optionally: Add logic to copy this to EC2 or use with Packer
             }
         }
 
         stage('Update Frontend config.js with Backend ALB URL') {
             steps {
                 script {
-                    def backendALB = "http://backend-alb.example.com" // Replace with actual ALB DNS
+                    def backendALB = "http://backend-alb.example.com" // Replace with actual value
                     sh "sed -i 's|REPLACE_BACKEND_URL|${backendALB}|' ${PKR_DIR}/app/client/src/pages/config.js"
                 }
             }
@@ -143,7 +162,7 @@ pipeline {
         stage('Map Frontend ALB to Route53') {
             steps {
                 sh """
-                    aws route53 change-resource-record-sets --hosted-zone-id ZONE_ID \
+                    aws route53 change-resource-record-sets --hosted-zone-id harishpro.com \
                       --change-batch '{
                         "Changes": [{
                           "Action": "UPSERT",
@@ -169,4 +188,5 @@ pipeline {
         }
     }
 }
+
 
